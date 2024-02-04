@@ -38,6 +38,12 @@ class Connection(abc.ABC):
         self._port = port
         self._dc_id = dc_id  # only for MTProxy, it's an abstraction leak
         self._log = loggers[__name__]
+        # 这段代码是对获取代理的方法进行备份，因为在从服务器接收信息的过程中会因为代理不通，导致获取的数据为0的情况，而产生异常
+        if proxy is not None and callable(proxy):
+            self._get_proxy = proxy
+        else:
+            self._get_proxy = None
+
         self._proxy = proxy
         self._local_addr = local_addr
         self._reader = None
@@ -110,6 +116,8 @@ class Connection(abc.ABC):
             parsed = self._parse_proxy(**self._proxy)
         else:
             raise TypeError("Proxy of unknown format: {}".format(type(self._proxy)))
+
+        self._log.info(f'使用转换后代理请求：{parsed}')
 
         # Always prefer `python_socks` when available
         if python_socks:
@@ -212,6 +220,10 @@ class Connection(abc.ABC):
         else:
             local_addr = None
 
+        if callable(self._proxy):
+            self._proxy = self._proxy()
+            # self._log.info(f'使用代理请求：{self._proxy}')
+
         if not self._proxy:
             self._reader, self._writer = await asyncio.wait_for(
                 asyncio.open_connection(
@@ -241,8 +253,10 @@ class Connection(abc.ABC):
         """
         Establishes a connection with the server.
         """
+        self._log.debug(f'开始执行服务器连接，连接超时{timeout}秒...')
         await self._connect(timeout=timeout, ssl=ssl)
         self._connected = True
+        self._log.debug('服务器连接成功,开启和服务器的通信的send和recv任务...')
 
         loop = helpers.get_running_loop()
         self._send_task = loop.create_task(self._send_loop())
@@ -258,12 +272,14 @@ class Connection(abc.ABC):
 
         self._connected = False
 
+        self._log.debug('开始取消send和recv任务...')
         await helpers._cancel(
             self._log,
             send_task=self._send_task,
             recv_task=self._recv_task
         )
 
+        self._log.debug('开始关闭和服务器的写的通道...')
         if self._writer:
             self._writer.close()
             if sys.version_info >= (3, 7):
@@ -299,8 +315,10 @@ class Connection(abc.ABC):
         This method returns a coroutine.
         """
         while self._connected:
+            self._log.debug(f'取出异步队列中的一条协程记录执行')
             result, err = await self._recv_queue.get()
             if err:
+                self._log.exception(err)
                 raise err
             if result:
                 return result
@@ -314,8 +332,11 @@ class Connection(abc.ABC):
         try:
             while self._connected:
                 self._send(await self._send_queue.get())
+                self._log.debug('发送请求数据结束')
                 await self._writer.drain()
+                self._log.debug(f'清空请求缓存数据结束,当前连接状态({self._connected})')
         except asyncio.CancelledError:
+            self._log.debug(f'触发了asyncio.CancelledError的异常，当前连接状态({self._connected})')
             pass
         except Exception as e:
             if isinstance(e, IOError):
@@ -332,6 +353,7 @@ class Connection(abc.ABC):
         try:
             while self._connected:
                 try:
+                    self._log.debug(f"使用 {self} 客户端循环接收数据")
                     data = await self._recv()
                 except asyncio.CancelledError:
                     break
@@ -345,6 +367,9 @@ class Connection(abc.ABC):
                 except InvalidBufferError as e:
                     self._log.warning('Server response had invalid buffer: %s', e)
                     await self._recv_queue.put((None, e))
+                except asyncio.TimeoutError as e:
+                    self._log.warning('客户端接收服务器数据超时，可能是网络连接不稳定: %s', e)
+                    await self._recv_queue.put((None, e))
                 except Exception as e:
                     self._log.exception('Unexpected exception in the receive loop')
                     await self._recv_queue.put((None, e))
@@ -352,7 +377,9 @@ class Connection(abc.ABC):
                 else:
                     await self._recv_queue.put((data, None))
         finally:
+            self._log.debug(f'服务器返回数据异常，连接开始断开...')
             await self.disconnect()
+            self._log.debug(f'服务器返回数据异常，连接断开了,连接状态:{self._connected}')
 
 
     def _init_conn(self):
@@ -368,10 +395,15 @@ class Connection(abc.ABC):
             self._writer.write(self._codec.tag)
 
     def _send(self, data):
+        self._log.debug(f'使用encode_packet编码后给服务器发送请求数据{data}')
         self._writer.write(self._codec.encode_packet(data))
 
     async def _recv(self):
-        return await self._codec.read_packet(self._reader)
+        # return await self._codec.read_packet(self._reader)
+        self._log.debug('使用read_packet从服务器接收器reader中接返回的数据中,等待30秒...')
+        body = await asyncio.wait_for(self._codec.read_packet(self._reader, self._log), timeout=30)
+        self._log.debug('恭喜，使用read_packet从服务器接收器reader中获取到数据了')
+        return body
 
     def __str__(self):
         return '{}:{}/{}'.format(

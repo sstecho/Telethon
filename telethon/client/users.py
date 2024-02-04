@@ -64,29 +64,45 @@ class UserMethods:
 
         for attempt in retry_range(self._request_retries):
             try:
-                future = sender.send(request, ordered=ordered)
-                if isinstance(future, list):
-                    results = []
-                    exceptions = []
-                    for f in future:
-                        try:
-                            result = await f
-                        except RPCError as e:
-                            exceptions.append(e)
-                            results.append(None)
-                            continue
-                        self.session.process_entities(result)
-                        exceptions.append(None)
-                        results.append(result)
-                        request_index += 1
-                    if any(x is not None for x in exceptions):
-                        raise MultiError(exceptions, results, requests)
+                if not self.is_connected():
+                    self._sender._retries = 6
+                    self._log[__name__].warning("连接自动断开了，重新连接")
+                    await self._sender.connect(self._connection(
+                        self.session.server_address,
+                        self.session.port,
+                        self.session.dc_id,
+                        loggers=self._log,
+                        proxy=self._proxy,
+                        local_addr=self._local_addr
+                    ))
+                if self.is_connected():
+                    future = sender.send(request, ordered=ordered)
+                    if isinstance(future, list):
+                        results = []
+                        exceptions = []
+                        for f in future:
+                            try:
+                                result = await f
+                            except RPCError as e:
+                                exceptions.append(e)
+                                results.append(None)
+                                continue
+                            self.session.process_entities(result)
+                            exceptions.append(None)
+                            results.append(result)
+                            request_index += 1
+                        if any(x is not None for x in exceptions):
+                            raise MultiError(exceptions, results, requests)
+                        else:
+                            return results
                     else:
-                        return results
+                        self._log[__name__].info("连接状态True，开始发送消息")
+                        result = await future
+                        self.session.process_entities(result)
+                        return result
                 else:
-                    result = await future
-                    self.session.process_entities(result)
-                    return result
+                    self._log[__name__].error("尝试多次连接失败")
+                    await asyncio.sleep(2)
             except (errors.ServerError, errors.RpcCallFailError,
                     errors.RpcMcgetFailError, errors.InterdcCallErrorError,
                     errors.TimedOutError,
@@ -127,6 +143,22 @@ class UserMethods:
                 if should_raise and await self.is_user_authorized():
                     raise
                 await self._switch_dc(e.new_dc)
+
+            except ConnectionError as e:
+                last_error = e
+                self._log[__name__].info(f'ConnectionError,{str(e)}')
+                await asyncio.sleep(2)  # 如果是连接异常了，就让程序暂停2秒再重新连接
+                # raise e
+
+            except DataInvalidError as e:
+                last_error = e
+                self._log[__name__].info(f'DataInvalidError,{str(e)}')
+
+            except Exception as e:
+                last_error = e
+                self._log[__name__].info(f'{type(e)},{str(e)}')
+                raise e
+
 
         if self._raise_last_call_error and last_error is not None:
             raise last_error

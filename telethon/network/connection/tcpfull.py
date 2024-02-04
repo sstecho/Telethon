@@ -21,9 +21,16 @@ class FullPacketCodec(PacketCodec):
         self._send_counter += 1
         return data + crc
 
-    async def read_packet(self, reader):
+    async def read_packet(self, reader, log=None):
+        log = None
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法开始获取响应体')
         packet_len_seq = await reader.readexactly(8)  # 4 and 4
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法开始获取响应体数据长度{packet_len_seq}')
         packet_len, seq = struct.unpack('<ii', packet_len_seq)
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法开始获取响应体数据解包{packet_len}，{seq}')
         if packet_len < 0 and seq < 0:
             # It has been observed that the length and seq can be -429,
             # followed by the body of 4 bytes also being -429.
@@ -37,13 +44,18 @@ class FullPacketCodec(PacketCodec):
             raise InvalidBufferError(packet_len_seq)
 
         body = await reader.readexactly(packet_len - 8)
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法获取到body({body})')
         checksum = struct.unpack('<I', body[-4:])[0]
         body = body[:-4]
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法获取解包之后的数据体({body})')
 
         valid_checksum = crc32(packet_len_seq + body)
         if checksum != valid_checksum:
             raise InvalidChecksumError(checksum, valid_checksum)
-
+        if log is not None:
+            log.debug(f'在connection.tcpfull中read_packet方法获取解包之后的数据体验证通过')
         return body
 
 

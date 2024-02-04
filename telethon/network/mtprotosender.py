@@ -225,11 +225,19 @@ class MTProtoSender:
         authorization key if necessary, and starting the send and
         receive loops.
         """
-        self._log.info('Connecting to %s...', self._connection)
+        self._log.info('Connecting to %s，尝试连接的次数= %d...', self._connection,self._retries)
+
+        if self._retries<0:
+            self._retries=0
 
         connected = False
 
-        for attempt in retry_range(self._retries):
+        for attempt in retry_range(self._retries,force_retry=False):
+            self._retries -= 1
+            if self._retries < 0:
+                self._log.debug('尝试连接次数小于 %d...', self._retries)
+                break
+
             if not connected:
                 connected = await self._try_connect(attempt)
                 if not connected:
@@ -349,7 +357,7 @@ class MTProtoSender:
         """
         Cleanly disconnects and then reconnects.
         """
-        self._log.info('Closing current connection to begin reconnect...')
+        self._log.info('关闭当前连接，腾出空间给重试的连接...')
         await self._connection.disconnect()
 
         await helpers._cancel(
@@ -368,13 +376,15 @@ class MTProtoSender:
         # Start with a clean state (and thus session ID) to avoid old msgs
         self._state.reset()
 
-        retries = self._retries if self._auto_reconnect else 0
+        self._retries = self._retries if self._auto_reconnect else 0
 
         attempt = 0
         ok = True
         # We're already "retrying" to connect, so we don't want to force retries
-        for attempt in retry_range(retries, force_retry=False):
+        for attempt in retry_range(self._retries, force_retry=False):
             try:
+                self._retries -= 1
+                self._log.debug(f'异常重连剩余{self._retries}次')
                 await self._connect()
             except (IOError, asyncio.TimeoutError) as e:
                 last_error = e
@@ -565,6 +575,7 @@ class MTProtoSender:
         acknowledged and dispatches control to different ``_handle_*``
         method based on its type.
         """
+        self._log.debug(f'process message ({message})')
         self._pending_ack.add(message.msg_id)
         handler = self._handlers.get(message.obj.CONSTRUCTOR_ID,
                                      self._handle_update)
